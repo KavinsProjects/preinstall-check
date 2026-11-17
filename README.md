@@ -9,7 +9,7 @@ Read-only Linux hardware checker for testing a PC **before installing** a distro
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/hardware-checker.git
+git clone https://github.com/KavinsProjects/preinstall-check
 cd hardware-checker
 bash run.sh
 ```
