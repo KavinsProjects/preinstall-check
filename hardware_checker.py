@@ -13,16 +13,22 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 PASS, FAIL, WARNING, NOT_TESTED = "PASS", "FAIL", "WARNING", "NOT_TESTED"
+
+# Plain-English labels shown on screen (JSON export keeps the original names).
+LABELS = {PASS: "OK", FAIL: "PROBLEM", WARNING: "CHECK", NOT_TESTED: "SKIPPED"}
 
 # Optional tools the checks use, mapped to their apt package names.
 OPTIONAL_TOOLS = {"lspci": "pciutils", "lsusb": "usbutils", "mokutil": "mokutil"}
 
 
-def result(component, status, details):
-    return {"component": component, "status": status, "details": details}
+def result(component, status, details, hint=""):
+    r = {"component": component, "status": status, "details": details}
+    if hint:
+        r["hint"] = hint
+    return r
 
 
 def run_command(command, timeout=10):
@@ -115,18 +121,26 @@ def check_ram():
     if not match:
         return result("RAM", WARNING, "Could not parse memory size")
     gb = int(match.group(1)) / 1024 / 1024
-    status = PASS if gb >= 3.5 else WARNING
-    return result("RAM", status, f"{gb:.1f} GB")
+    if gb >= 3.5:
+        return result("RAM", PASS, f"{gb:.1f} GB")
+    return result(
+        "RAM", WARNING, f"{gb:.1f} GB",
+        "Under 4 GB is tight for modern desktops; pick a lightweight edition (e.g. Xfce)",
+    )
 
 
 def check_gpu(env):
-    """Detect GPU via PCI class codes (VGA 0300, XGA 0302, 3D 0302/0380)."""
+    """Detect GPU via PCI class codes (0300 VGA, 0301 XGA, 0302 3D, 0380 other display)."""
     devices = run_command(["lspci", "-nnk"])
+    wsl_gpu = env == "wsl" and Path("/dev/dxg").exists()
 
     if devices is None:
-        if env == "wsl" and Path("/dev/dxg").exists():
+        if wsl_gpu:
             return [result("GPU", PASS, "WSL GPU passthrough available (/dev/dxg)")]
-        return [result("GPU", NOT_TESTED, "lspci is unavailable (install pciutils)")]
+        return [result(
+            "GPU", NOT_TESTED, "Could not look for a graphics card",
+            "Install the 'pciutils' package and run again",
+        )]
 
     gpu_blocks = [
         block for block in devices.split("\n\n")
@@ -134,17 +148,19 @@ def check_gpu(env):
     ]
 
     if not gpu_blocks:
-        if env == "wsl" and Path("/dev/dxg").exists():
+        if wsl_gpu:
             return [result("GPU", PASS, "WSL GPU passthrough available (/dev/dxg)")]
         return [result(
-            "GPU", FAIL,
-            "No GPU detected. Hint: run 'ubuntu-drivers devices' to find a driver"
+            "GPU", FAIL, "No graphics card detected",
+            "Run 'ubuntu-drivers devices' to see if a driver is available",
         )]
 
     results = []
     for block in gpu_blocks:
         lines = block.splitlines()
-        name = lines[0].split(" ", 1)[1] if " " in lines[0] else lines[0]
+        # "06:00.0 VGA compatible controller [0300]: AMD ... [1002:1681] (rev c7)"
+        name = lines[0].split(": ", 1)[-1]
+        name = re.sub(r"\[[0-9a-f]{4}:[0-9a-f]{4}\]|\(rev [0-9a-f]+\)", "", name).strip()
         results.append(result("GPU", PASS, name))
 
         driver = next(
@@ -152,18 +168,21 @@ def check_gpu(env):
              if "Kernel driver in use:" in l),
             None,
         )
+        is_nvidia = "nvidia" in block.lower()
         if driver is None:
             results.append(result(
-                "GPU Driver", FAIL,
-                "No kernel driver loaded. Hint: run 'ubuntu-drivers devices'"
+                "GPU Driver", FAIL, "The graphics card is found but no driver is using it",
+                "Run 'ubuntu-drivers devices' then 'sudo ubuntu-drivers autoinstall'"
+                if is_nvidia else "Try a newer kernel or a newer distro release",
             ))
-        elif driver == "nouveau" and "nvidia" in block.lower():
+        elif driver == "nouveau" and is_nvidia:
             results.append(result(
                 "GPU Driver", WARNING,
-                "Open-source 'nouveau' in use; proprietary NVIDIA driver may perform better"
+                "Working, but using the basic open-source 'nouveau' driver",
+                "For better performance: 'sudo ubuntu-drivers autoinstall'",
             ))
         else:
-            results.append(result("GPU Driver", PASS, f"Kernel driver in use: {driver}"))
+            results.append(result("GPU Driver", PASS, f"Working (driver: {driver})"))
     return results
 
 
@@ -178,7 +197,7 @@ def check_audio():
         return result("Audio", PASS, "Audio sink information available")
 
     if cards is not None:
-        return result("Audio", FAIL, "No sound cards detected")
+        return result("Audio", FAIL, "No sound card detected")
     return result("Audio", NOT_TESTED, "No audio information available")
 
 
@@ -211,10 +230,26 @@ def check_bluetooth():
 
 
 def check_storage():
-    output = run_command(["lsblk", "-dn", "-o", "NAME,SIZE,TYPE"])
-    if output:
-        return result("Storage", PASS, "; ".join(" ".join(l.split()) for l in output.splitlines()))
-    return result("Storage", NOT_TESTED, "Storage information unavailable")
+    """List real disks only; hide loop/zram devices and mark removable drives."""
+    output = run_command(["lsblk", "-dn", "-o", "NAME,SIZE,TYPE,RM"])
+    if not output:
+        return result("Storage", NOT_TESTED, "Storage information unavailable")
+
+    disks = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        name, size, kind, removable = parts[:4]
+        if kind != "disk" or name.startswith(("loop", "zram", "ram")):
+            continue
+        label = "removable, probably your live USB" if removable == "1" else "internal"
+        disks.append(f"{name} {size} ({label})")
+
+    if not disks:
+        return result("Storage", WARNING, "No disks detected",
+                      "The installer needs a disk to install onto")
+    return result("Storage", PASS, "; ".join(disks))
 
 
 def check_webcam():
@@ -232,21 +267,42 @@ def check_webcam():
 
     if names:
         return result("Webcam", PASS, f"Camera detected: {', '.join(names)}")
-    return result("Webcam", WARNING, "No video capture device detected")
+    return result("Webcam", WARNING, "No camera detected (normal if this laptop has no webcam)")
 
 
 def check_usb():
-    output = run_command(["lsusb"])
-    if output:
-        return result("USB", PASS, f"{len(output.splitlines())} USB device entries detected")
+    """Report USB devices from sysfs, skipping the virtual root hubs.
 
+    `lsusb` counts every entry, including one invisible root hub per USB
+    controller and built-in parts such as Bluetooth, so its total looks much
+    bigger than the number of physical ports.
+    """
+    usb_root = Path("/sys/bus/usb/devices")
     try:
-        count = sum(
-            1 for d in Path("/sys/bus/usb/devices").iterdir() if re.match(r"^\d+-\d", d.name)
-        )
-        return result("USB", PASS, f"{count} USB devices detected (sysfs)")
+        entries = list(usb_root.iterdir())
     except OSError:
+        entries = []
+
+    if not any(e.name.startswith("usb") for e in entries):
         return result("USB", NOT_TESTED, "No USB information available")
+
+    plugged, built_in = [], []
+    for entry in entries:
+        if not (entry / "idVendor").exists():
+            continue  # an interface entry, not a device
+        product = (read_text(entry / "product") or "").strip() or "Unknown device"
+        if "root hub" in product.lower():
+            continue
+        location = (read_text(entry / "removable") or "").strip()
+        (plugged if location == "removable" else built_in).append(product)
+
+    if plugged:
+        text = f"Working. Plugged into your ports: {', '.join(plugged)}"
+    else:
+        text = "Working. Nothing detected in your ports"
+    if built_in:
+        text += f"; {len(built_in)} built-in part(s) such as Bluetooth or hubs"
+    return result("USB", PASS, text)
 
 
 def check_touchpad():
@@ -283,7 +339,8 @@ def check_firmware_errors():
     """Look for firmware load failures in the kernel log."""
     output = run_command(["dmesg"])
     if output is None:
-        return result("Firmware", NOT_TESTED, "dmesg unavailable (try with sudo)")
+        return result("Firmware", NOT_TESTED, "Kernel log unavailable",
+                      "Try running with sudo")
 
     errors = [
         l.strip() for l in output.splitlines()
@@ -292,7 +349,10 @@ def check_firmware_errors():
     ]
     if errors:
         shown = " | ".join(e.split("] ", 1)[-1] for e in errors[:3])
-        return result("Firmware", WARNING, f"{len(errors)} firmware error(s): {shown}")
+        return result(
+            "Firmware", WARNING, f"{len(errors)} firmware error(s): {shown}",
+            "Some hardware may need extra firmware (try 'sudo apt install linux-firmware')",
+        )
     return result("Firmware", PASS, "No firmware load errors in kernel log")
 
 
@@ -304,9 +364,9 @@ def generate_report(system_info, env, results, missing_tools):
         for s in (PASS, FAIL, WARNING, NOT_TESTED)
     }
 
-    print("\n" + "=" * 50)
-    print("             HARDWARE CHECKER")
-    print("=" * 50)
+    print("\n" + "=" * 56)
+    print("                  HARDWARE CHECKER")
+    print("=" * 56)
     print(f"Operating System : {system_info['distribution']}")
     print(f"Kernel           : {system_info['kernel']}")
     print(f"Architecture     : {system_info['architecture']}")
@@ -318,20 +378,35 @@ def generate_report(system_info, env, results, missing_tools):
         print(f"\nNote: running in {label}. Hardware results are not meaningful.")
         print("Run this from a live USB session on the real PC.")
 
-    print("\n" + "-" * 50)
-    print("                 SCAN RESULTS")
-    print("-" * 50)
+    print("\n" + "-" * 56)
+    print("                  SCAN RESULTS")
+    print("-" * 56)
+    print("OK = working   CHECK = look at it   PROBLEM = needs fixing\n")
     for r in results:
-        print(f"[{r['status']:<10}] {r['component']:<15} {r['details']}")
+        print(f"[{LABELS[r['status']]:<7}] {r['component']:<11} {r['details']}")
+        if r.get("hint") and r["status"] != PASS:
+            print(f"{'':<10}-> What to do: {r['hint']}")
 
-    print("\n" + "=" * 50)
-    print("                 FINAL REPORT")
-    print("=" * 50)
-    for status, count in counts.items():
-        print(f"{status:<15}: {count}")
+    print("\n" + "=" * 56)
+    print("                    SUMMARY")
+    print("=" * 56)
+    print(f"Working fine    : {counts[PASS]}")
+    print(f"Worth checking  : {counts[WARNING]}")
+    print(f"Problems        : {counts[FAIL]}")
+    print(f"Skipped         : {counts[NOT_TESTED]}")
+
+    if env == "bare-metal":
+        print()
+        if counts[FAIL]:
+            print("Some parts need attention before you install (see 'What to do' above).")
+        elif counts[WARNING]:
+            print("Mostly good. Items marked CHECK may be normal for your laptop")
+            print("(for example, no webcam on a model that never had one).")
+        else:
+            print("Everything we tested looks good for installing Linux.")
 
     print("\nScan completed.")
-    print("=" * 50)
+    print("=" * 56)
 
     if missing_tools:
         print("\nTip: some checks were limited because tools are missing.")
