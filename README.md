@@ -57,9 +57,21 @@ Statuses: `PASS`, `FAIL`, `WARNING`, `NOT_TESTED`. Touchpad and battery warnings
 
 The tool detects WSL and virtual machines and prints a note, because their hardware results are not meaningful. Use it from a live USB session on the real PC. WSL is fine for testing the tool itself.
 
+
+
+
 ## JSON output
 
 `--json FILE` writes version, scan time, environment, system info, summary counts, missing tools and every result. This is the input planned for the AI agent layer.
+
+## Demo
+
+Linux Mint 22.3 — Live USB Hardware Scan
+
+Tested on a real PC running Linux Mint 22.3 through a bootable Live USB environment, without installing Linux on the machine.
+<img width="1019" height="900" alt="screenshot " src="https://github.com/user-attachments/assets/822880ef-e5c5-4703-8571-e19d74b56955" />
+
+
 
 ## Roadmap
 
