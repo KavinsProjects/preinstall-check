@@ -1,4 +1,4 @@
-# Hardware Checker
+# Preinstall Check
 
 Read-only Linux hardware checker for testing a PC **before installing** a distro. Boot a live USB, run the checker, and see whether audio, GPU driver, Wi-Fi, Bluetooth, webcam and more are detected.
 
@@ -9,8 +9,8 @@ Read-only Linux hardware checker for testing a PC **before installing** a distro
 ## Quick start
 
 ```bash
-git clone https://github.com/KavinsProjects/preinstall-check
-cd hardware-checker
+git clone https://github.com/KavinsProjects/preinstall-check.git
+cd preinstall-check
 bash run.sh
 ```
 
@@ -19,7 +19,7 @@ bash run.sh
 On a live USB, connect to the internet first. No git? Download the files directly:
 
 ```bash
-curl -O https://raw.githubusercontent.com/<you>/hardware-checker/main/hardware_checker.py
+curl -O https://raw.githubusercontent.com/KavinsProjects/preinstall-check/main/hardware_checker.py
 python3 hardware_checker.py
 ```
 
